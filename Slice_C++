@@ -1,0 +1,660 @@
+#include "opencv2/core/core.hpp"
+#include "opencv2/highgui/highgui.hpp"
+#include "opencv2/imgproc/imgproc.hpp"
+#include "opencv2/features2d/features2d.hpp"
+#include "opencv2/calib3d/calib3d.hpp"
+#include "opencv2/nonfree/features2d.hpp"
+
+#include <iostream>
+#include <string>
+using namespace cv;
+using namespace std;
+
+// Declare functions
+int analyze_slice(Mat slice, const char* orientation);
+
+#define numElems 25 // MAXIMUM NUMBER OF ELMENENTS
+struct element	// DATA STRUTCTURE TO STORE ELEMENT ATTRIBUTES
+{
+	int nodes[2];
+	string type;
+	Scalar area;
+}elem[numElems];
+
+// initial and max values of the parameters of interests - USED FOR HOUGH CIRCLE DETECT
+const int cannyThresholdInitialValue = 200;
+const int accumulatorThresholdInitialValue = 50;
+const int maxAccumulatorThreshold = 200;
+const int maxCannyThreshold = 255;
+
+//Find contours
+vector<vector<Point> > contours;
+vector<vector<Point> > contours_slice;
+vector<Vec4i> hierarchy;
+vector<Vec4i> hierarchy_slice;
+RNG rng(12345); // Randomize the colors of bounding boxes
+
+int main()
+{
+	//Mat image = imread("C:\\Users\\Kyungho Nam\\Dropbox\\Own\\currentbuild\\circuit10.png", CV_LOAD_IMAGE_COLOR); // Input image
+	Mat image = imread("C:\\Users\\Kyungho Nam\\Dropbox\\Own\\cam4.jpg", CV_LOAD_IMAGE_COLOR); // Input image
+	//imshow("Show me your mommy ", image);
+	
+	//Image resize if the image is too big
+	int image_col_value = 680;
+	if (image.cols > 1000){
+		Size size(image.cols / image.cols * image_col_value, int(image.rows / double(image.cols) * image_col_value));
+		resize(image, image, size);
+		imshow("Show me the money ", image);
+	}
+	//waitKey(0);
+
+	Mat img_nodes = image.clone();
+	Mat img_0 = image.clone(), img_90 = image.clone(), img_dilated = image.clone();
+
+	// Create Solid Black and White Images  and   Grayscale and BW of input image
+	Mat white(image.rows, image.cols, CV_8UC3, Scalar(255, 255, 255));
+	Mat black(image.rows, image.cols, CV_8UC3, Scalar(0, 0, 0));
+
+	int min_x_Arr[numElems];
+	int min_y_Arr[numElems];
+	int dx_Arr[numElems];
+	int dy_Arr[numElems];
+	int area_Arr[numElems];
+
+	Mat gray_orig, bw_orig, canny_img;
+	cvtColor(image, gray_orig, COLOR_BGR2GRAY);
+	threshold(gray_orig, bw_orig, 120, 255, 0);
+	imshow("GRAY", gray_orig);
+	imshow("BW", bw_orig);
+
+	// Fitler Bank _Kernel (0 degree and 90 degree) :
+	Canny(gray_orig, canny_img, 100, 200, 3);
+	imshow("Canny", canny_img);
+	// Dilate Image
+	dilate(canny_img, canny_img, Mat(), Point(-1, -1), 1, 1, 1);
+	//imshow("Dilated Image", img_dilated);
+	imshow("img_diliated", canny_img);
+	//Factor out only biggest area island (Circuit without OCRs and small dots we don't need)
+	/// Find contours from canny image
+	findContours(canny_img, contours, hierarchy, CV_RETR_LIST, CV_CHAIN_APPROX_NONE, Point(0, 0));
+
+	/// Draw contours
+	Mat drawing = Mat::zeros(canny_img.size(), CV_8UC3);
+	for (int i = 0; i< contours.size(); i++)
+	{
+		Scalar color = Scalar(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+		drawContours(drawing, contours, i, color, 2, 8, hierarchy, 0, Point());
+	}
+
+	/// Show in a window
+	namedWindow("Contours", CV_WINDOW_AUTOSIZE);
+	imshow("Contours", drawing);
+
+	waitKey(0);
+
+
+
+
+	Mat kern_d0 = (Mat_<char>(5, 5) << -1, -2, 0, 2, 1,
+		-1, -2, 0, 2, 1,
+		-1, -2, 0, 2, 1,
+		-1, -2, 0, 2, 1,
+		-1, -2, 0, 2, 1);
+
+	Mat kern_d90 = (Mat_<char>(5, 5) << 1, 1, 1, 1, 1,
+		2, 2, 2, 2, 2,
+		0, 0, 0, 0, 0,
+		-2, -2, -2, -2, -2,
+		-1, -1, -1, -1, -1);
+
+	// APPLY FILTERS:
+	filter2D(canny_img, img_0, canny_img.depth(), kern_d0);
+	imshow("After Filter 0deg", img_0);
+
+	filter2D(img_0, img_90, canny_img.depth(), kern_d90);
+	imshow("After Filter 90deg", img_90);
+
+	// Dilate Image
+	dilate(img_90, img_dilated, Mat(), Point(-1, -1), 7, 1, 1);
+	//imshow("Dilated Image", img_dilated);
+	imshow("img_diliated", img_dilated);
+
+	/// Find contours   
+	findContours(img_dilated, contours, hierarchy, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE, Point(0, 0));
+
+	// Create 4D Mat Data Structure:
+	vector<Mat> imageVector;
+
+	// Corresponding points of images in each voxel of the previous structure
+	vector<int> imgVectLoc_x0;
+	vector<int> imgVectLoc_y0;
+	vector<int> imgVectLoc_dx;
+	vector<int> imgVectLoc_dy;
+
+	// Nodes Corresponding to 
+	vector<int> node_vect;
+
+	cout << "Number of contours :: " << contours.size() << endl;
+
+	/// Draw bounding boxes superimposed on original image
+	// Detetermine if vertical or horizontal
+	//Mat drawing = image.clone();
+
+	for (int i = 0; i < contours.size(); i++)
+	{
+		int max_x = 0, max_y = 0;
+		int min_x = contours[i][0].x, min_y = contours[i][0].y;
+		for (int j = 0; j < contours[i].size(); j++)
+		{
+			if (contours[i][j].x < min_x)
+				min_x = contours[i][j].x;
+			if (contours[i][j].x > max_x)
+				max_x = contours[i][j].x;
+			if (contours[i][j].y < min_y)
+				min_y = contours[i][j].y;
+			if (contours[i][j].y > max_y)
+				max_y = contours[i][j].y;
+		}
+		cout << "i = " << i << endl;
+		cout << "MIN_X = " << min_x << endl;
+		cout << "MAX_X = " << max_x << endl;
+		cout << "MIN_Y = " << min_y << endl;
+		cout << "MAX_Y = " << max_y << endl;
+
+		min_x_Arr[i] = min_x;
+		min_y_Arr[i] = min_y;
+
+		// Determine size of image to crop
+		int dx = max_x - min_x;
+		dx_Arr[i] = dx;
+
+		int dy = max_y - min_y;
+		dy_Arr[i] = dy;
+
+		cout << "dx = " << dx << endl;
+		cout << "dy = " << dy << endl;
+
+		int area = dx*dy; // Area for all the contours with nodes, components
+		area_Arr[i] = area;
+		cout << endl << endl << "AREA = " << area << endl;
+	}
+	int min_area = area_Arr[0];
+	for (int i = 0; i < contours.size(); i++)
+	{
+		if (area_Arr[i] < min_area)
+		{
+			min_area = area_Arr[i];
+		}
+	}
+	cout << endl << endl << "MIN AREA :: " << min_area << endl << endl;
+
+	/*
+	for (int i = 0; i < contours.size(); i++)
+		cout << endl << "area values : " << area_Arr[i] << endl;
+	*/
+
+	//---------------------------------------------------------------------------HOUGH CIRCLE //
+
+	// Convert it to gray
+	Mat src_gray;
+	cvtColor(image, src_gray, COLOR_BGR2GRAY);
+	// Reduce the noise so we avoid false circle detection
+	GaussianBlur(src_gray, src_gray, Size(9, 9), 2, 2);
+	imshow("GaussianBlur", src_gray);
+
+	// OutputArray circles
+	vector<Vec3f> circles;
+	HoughCircles(src_gray, circles, CV_HOUGH_GRADIENT, 1, src_gray.rows / 10, 50, 50, 0, 0); // ---------------- Play around with the parameters
+	/*
+		src_gray: Input image (grayscale)
+		circles: A vector that stores sets of 3 values: x_{c}, y_{c}, r for each detected circle.
+		CV_HOUGH_GRADIENT: Define the detection method. Currently this is the only one available in OpenCV
+		dp = 1: The inverse ratio of resolution
+		min_dist = src_gray.rows/8: Minimum distance between detected centers
+		param_1 = 200: Upper threshold for the internal Canny edge detector
+		param_2 = 100*: Threshold for center detection.
+		min_radius = 0: Minimum radio to be detected. If unknown, put zero as default.
+		max_radius = 0: Maximum radius to be detected. If unknown, put zero as default
+	*/
+	//Draw the detected circles:
+	for (size_t j = 0; j < circles.size(); j++)
+	{
+		Point center(cvRound(circles[j][0]), cvRound(circles[j][1]));
+		int radius = cvRound(circles[j][2]);
+		// circle center
+		circle(image, center, 3, Scalar(0, 255, 0), -1, 8, 0);
+		// circle outline
+		circle(image, center, radius, Scalar(0, 0, 255), 3, 8, 0);
+
+		//show up informations to command window
+		cout << j << "th circle's x coordinate = " << circles[j][0] << endl;
+		cout << j << "th circle's y coordinate = " << circles[j][1] << endl;
+		cout << j << "th circle's radius = " << circles[j][2] << endl;
+	}
+	cout << "Number of circles = " << circles.size() << endl << endl;
+	//Display the detected circle(s):
+	namedWindow("Hough Circle Transform Demo", CV_WINDOW_AUTOSIZE);
+	imshow("Hough Circles", image);
+
+	waitKey(0);
+	//---------------------------------------------------------------------------------------//
+
+	for (int i = 0; i < contours.size(); i++)
+	{
+		if (area_Arr[i] > 3 * min_area)
+		{
+			cout << " " << i << "th contour categorizing..." << endl;
+			// Grab ROI: [x0, y0, dx, dy] and crop from original image
+			Mat D(img_90, Rect(min_x_Arr[i], min_y_Arr[i], dx_Arr[i], dy_Arr[i])); // using a rectangle
+			Mat image_2 = image.clone();
+			Mat ROI(image_2, Rect(min_x_Arr[i], min_y_Arr[i], dx_Arr[i], dy_Arr[i])); // using a rectangle
+			imshow("D", D);
+			imshow("ROI", ROI);
+
+			// Analyze each cropped imaarge:
+
+			// Those are the squre shape components (WARNING!! :: Nodes included)
+			//double ratio = double(dx_Arr[i]) / double(dy_Arr[i]);
+			//if ((1 - epsilon <= ratio) && (ratio <= 1 + epsilon))
+			//{
+				//cout << "Categorize component type" << endl <<endl;
+				
+				// Categorize components with image slicing
+				// Circles
+/*				for (size_t j = 0; j < circles.size(); j++)
+				{
+					cout << " i is  = " << i << endl;
+					cout << "A is = " << min_x_Arr[i] << endl;
+					cout << "circles[j][0] is = " << circles[j][0] << endl;
+					cout << "B is = " << min_x_Arr[i] + dx_Arr[i] << endl << endl;
+
+					cout << "A is = " << min_y_Arr[i] << endl;
+					cout << "circles[j][0] is = " << circles[j][1] << endl;
+					cout << "B is = " << min_y_Arr[i] + dy_Arr[i] << endl;
+
+					if (min_x_Arr[i] < circles[j][0] < (min_x_Arr[i]+dx_Arr[i]))
+					{
+						if (min_y_Arr[i] < circles[j][1] < (min_y_Arr[i]+dy_Arr[i]))
+						{
+							Mat image_c = bw_orig.clone();
+							Mat img_circle(image_c, Rect(min_x_Arr[i], min_y_Arr[i], dx_Arr[i], dy_Arr[i]));
+							imshow("img_circle", img_circle);
+							
+							findContours(img_circle, contours_slice, hierarchy_slice, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE, Point(0, 0));
+							cout << "Contour number of circle = " << contours_slice.size() << endl;
+							if (contours_slice.size() == 2){
+								cout << "Object is a CURRENT SOURCE!" << endl << endl;
+								elem[i].type = "I";
+							}
+							if (contours_slice.size() == 3){
+								cout << "Object is a VOLTAGE SOURCE!" << endl << endl;
+								elem[i].type = "V";
+							}
+							waitKey(0);
+						}
+					}
+*/
+					// Categorize components with image slicing
+					// Except circles
+/*					else if ((circles[j][0]< min_x_Arr[i]) && (circles[j][0] > (min_x_Arr[i] + dx_Arr[i])))
+					{
+						if ((circles[j][1]< min_y_Arr[i]) && (circles[j][1] > (min_y_Arr[i] + dy_Arr[i])))
+						{
+*/
+							//int delta = 2;
+							int x0 = int(min_x_Arr[i] + floor(double(dx_Arr[i]) / 2));// -(delta + 1));
+							Mat image_4 = bw_orig.clone();
+							Mat slice_vert(image_4, Rect(x0, min_y_Arr[i], 1, dy_Arr[i])); // using a rectangle
+							imshow("slice image", slice_vert);
+							//imwrite("C:\\Users\\Kyungho Nam\\Dropbox\\Own\\currentbuild\\slice_image_vert.png", slice_vert);
+							//waitKey(0);
+							int num_contours_vert = analyze_slice(slice_vert, "vert");
+
+							//int delta = 2;
+							int y0 = int(min_y_Arr[i] + floor(double(dy_Arr[i]) / 2)); // - (delta + 1));
+							Mat image_11 = bw_orig.clone();
+							Mat slice_horz(image_11, Rect(min_x_Arr[i], y0, dx_Arr[i], 1)); // using a rectangle
+							imshow("slice image", slice_horz);
+							//imwrite("C:\\Users\\Kyungho Nam\\Dropbox\\Own\\currentbuild\\slice_image_horz.png", slice_horz);
+							//waitKey(0);
+							int num_contours_horz = analyze_slice(slice_horz, "horz");
+
+
+							//cout << "Vertical number of contours = " << num_contours_vert << endl;
+							//cout << "Horizontal number of contours = " << num_contours_horz << endl;
+
+							if (num_contours_vert == 0){
+								if (num_contours_horz == 0){
+									cout << "Object is a CAPACITOR!" << endl;			// It rarely happen that sometimes CAPACITOR has 0 and 0 numbers of contours.
+									elem[i].type = "C";
+								}
+								else if (num_contours_horz == 2){
+									cout << "Object is a CAPACITOR!" << endl;
+									elem[i].type = "C";
+								}
+							}
+							if (num_contours_vert == 1){
+								if (num_contours_horz == 3){
+									cout << "Object is a CURRENT SOURCE!" << endl;       // It rarely happen that sometimes CURRENT SOURCE has 1 and 3 numbers of contours.
+									elem[i].type = "I";
+								}
+								else if (num_contours_horz >= 5){
+									int y0_down2 = int(min_y_Arr[i] + floor(double(dy_Arr[i]) / 2) /*Shifting*/ + 2);
+									Mat image_down2 = bw_orig.clone();
+									Mat slice_horz_down2(image_down2, Rect(min_x_Arr[i], y0_down2, dx_Arr[i], 1)); // using a rectangle
+									//imshow("slice image", slice_horz_m2);
+									//imwrite("C:\\Users\\Kyungho Nam\\Dropbox\\Own\\currentbuild\\slice_image_horz.png", slice_horz_m2);
+									//waitKey(0);
+									int num_contours_horz_down2 = analyze_slice(slice_horz_down2, "horz");
+									if (num_contours_horz_down2 == 0){
+										cout << "Object is a INDUCTOR!" << endl << endl;    // It is straw hat shape inductor
+										elem[i].type = "L";
+									}
+									else{
+										cout << "Object is a 95% RESISTOR!" << endl << endl;    // 95% Resistor and 5% Inductor
+										elem[i].type = "R";
+									}
+								}
+							}
+							if (num_contours_vert == 2){
+								if (num_contours_horz == 0){
+									cout << "Object is a CAPACITOR!" << endl << endl;
+									elem[i].type = "C";
+								}
+								else if (num_contours_horz == 2){
+									cout << "Object is a VOLTAGE SOURCE!" << endl << endl;       // It rarely happen that sometimes VOLTAGE SOURCE has 2 and 2 numbers of contours.
+									elem[i].type = "V";
+								}
+								else if (num_contours_horz == 3){
+									cout << "Object is a VOLTAGE SOURCE!" << endl << endl;
+									elem[i].type = "V";
+								}
+								else if (num_contours_horz == 4){
+									cout << "Object is a VOLTAGE SOURCE!" << endl << endl;
+									elem[i].type = "V";
+								}
+								else if (num_contours_horz >= 5){
+									cout << "Object is a INDUCTOR!" << endl << endl;    // 100% Inductor
+									elem[i].type = "L";
+								}
+							}
+							if (num_contours_vert == 3){
+								if (num_contours_horz == 1){
+									cout << "Object is a CURRENT SOURCE!" << endl;       // It rarely happen that sometimes CURRENT SOURCE has 1 and 3 numbers of contours.
+									elem[i].type = "I";
+								}
+								else if (num_contours_horz == 2){
+									cout << "Object is a VOLTAGE SOURCE!" << endl << endl;
+									elem[i].type = "V";
+								}
+								else if (num_contours_horz == 3){
+									cout << "Object is a CURRENT SOURCE!" << endl << endl;
+									elem[i].type = "I";
+								}
+								else if (num_contours_horz == 4){
+									cout << "Object is a VOLTAGE SOURCE!" << endl << endl;
+									elem[i].type = "V";
+								}
+							}
+							if (num_contours_vert == 4){
+								if (num_contours_horz == 2){
+									cout << "Object is a VOLTAGE SOURCE!" << endl << endl;
+									elem[i].type = "V";
+								}
+								else if (num_contours_horz == 3){
+									cout << "Object is a VOLTAGE SOURCE!" << endl << endl;
+									elem[i].type = "V";
+								}
+							}
+							if (num_contours_vert >= 5){
+								if (num_contours_horz == 1){
+									int x0_left2 = int(min_x_Arr[i] + floor(double(dx_Arr[i]) / 2) /*Shifting*/ - 2);
+									Mat image_left2 = bw_orig.clone();
+									Mat slice_horz_left2(image_left2, Rect(x0_left2, min_y_Arr[i], 1, dy_Arr[i]));
+									//imshow("slice image", slice_horz_left2);
+									//imwrite("C:\\Users\\Kyungho Nam\\Dropbox\\Own\\currentbuild\\slice_horz_left2.png", slice_horz_left2);
+									//waitKey(0);
+									int num_contours_horz_left2 = analyze_slice(slice_horz_left2, "horz");
+									int x0_right2 = int(min_x_Arr[i] + floor(double(dx_Arr[i]) / 2) /*Shifting*/ + 2);
+									Mat image_right2 = bw_orig.clone();
+									Mat slice_horz_right2(image_right2, Rect(x0_right2, min_y_Arr[i], 1, dy_Arr[i]));
+									//imshow("slice image", image_right2);
+									//imwrite("C:\\Users\\Kyungho Nam\\Dropbox\\Own\\currentbuild\\image_right2.png", image_right2);
+									//waitKey(0);
+									int num_contours_horz_right2 = analyze_slice(slice_horz_right2, "horz");
+
+									if (num_contours_horz_left2 == 0){
+										cout << "Object is a INDUCTOR!" << endl << endl;    // It is straw hat shape inductor
+										elem[i].type = "L";
+									}
+									else if (num_contours_horz_right2 == 0){
+										cout << "Object is a INDUCTOR!" << endl << endl;    // It is straw hat shape inductor
+										elem[i].type = "L";
+									}
+									else{
+										cout << "Object is a 95% RESISTOR!" << endl << endl;    // 95% Resistor and 5% Inductor
+										elem[i].type = "R";
+									}
+								}
+								else if (num_contours_horz == 2){
+									cout << "Object is a INDUCTOR!" << endl << endl;    // 100% Inductor
+									elem[i].type = "L";
+								}
+							}
+
+							//elem[i].elem = elem::Resister;       
+							Mat white_copy = white.clone();
+							Mat small(white_copy, Rect(min_x_Arr[i], min_y_Arr[i], dx_Arr[i], dy_Arr[i]));
+							imshow("small", small);
+							small.copyTo(img_nodes(Rect(min_x_Arr[i], min_y_Arr[i], small.cols, small.rows)));
+							imshow("IMGNODES!!!!", img_nodes);
+
+							// Grow ROI and push onto 4D Vector of Matrices
+							Mat image_3 = image.clone();
+							Mat ROI_grow(image_3, Rect(abs(min_x_Arr[i] - abs(double(dx_Arr[i] / 10))), abs(min_y_Arr[i] - abs(double(dy_Arr[i] / 10))),
+								dx_Arr[i] + 2 * abs(double(dx_Arr[i] / 10)), dy_Arr[i] + 2 * abs(double(dy_Arr[i] / 10)))); // using a rectangle
+							imshow("ROI_GROW!!!!", ROI_grow);
+
+							imageVector.push_back(ROI_grow);// Add image to vector
+							imgVectLoc_x0.push_back(abs(min_x_Arr[i] - abs(double(dx_Arr[i] / 10))));
+							imgVectLoc_y0.push_back(abs(min_y_Arr[i] - abs(double(dy_Arr[i] / 10))));
+							imgVectLoc_dx.push_back(dx_Arr[i] + 2 * abs(double(dx_Arr[i] / 10)));
+							imgVectLoc_dy.push_back(dy_Arr[i] + 2 * abs(double(dy_Arr[i] / 10)));
+							imshow("New Image", image_3);
+							waitKey(0);
+						//}
+					//}
+				}
+
+				/*
+				Scalar color = Scalar(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+
+				drawContours(thresh_slice, contours_slice, 0, color, 2, 8, hierarchy_slice, 0, Point());
+
+
+				for (size_t k = 0; k < contours_slice.size(); k++)
+					drawContours(thresh_slice, contours_slice, k, color, 2, 8, hierarchy, 0, Point());
+
+				//			imshow("thresh_slice", thresh_slice);
+				*/
+	}
+
+	// Dynamically allocate memory
+	int* node_arr = (int *)malloc(16 * sizeof(int));  // Do we still need this?
+	//int node_arr[4];
+
+	// ANALYZE THE NODES
+	//analyze_nodes(img_nodes);
+
+	/// Find contours   
+	vector<vector<Point> > contours_bw_label;
+	vector<Vec4i> hierarchy_bw_label;
+
+	Mat gray_nodes, bw_nodes, thresh_nodes;
+	cvtColor(img_nodes, gray_nodes, COLOR_BGR2GRAY);
+	bitwise_not(gray_nodes, gray_nodes);
+	imshow("NODE before Node", gray_nodes);
+	threshold(gray_nodes, bw_nodes, 120, 1, 0);
+	imshow("NODE!!!!!!!!!!", bw_nodes);
+
+	// contours_bw_label.size() is the number of NODES
+	findContours(bw_nodes, contours_bw_label, hierarchy_bw_label, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE, Point(0, 0));
+	cout << endl << "Number of NODES = " << contours_bw_label.size() << endl;
+
+	cvtColor(bw_nodes, img_nodes, COLOR_GRAY2BGR);
+
+	Mat color_nodes = img_nodes.clone();
+	for (int i = 0; i < contours_bw_label.size(); i++)
+	{
+		Scalar color = Scalar(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+		drawContours(color_nodes, contours_bw_label, i, color, 2, 8, hierarchy_bw_label, 0, Point());
+	}
+	imshow("Node Coloring", color_nodes);
+	//imwrite("C:\\Users\\Kyungho Nam\\Dropbox\\Own\\currentbuild\\Node_Colorrrring.png", color_nodes);
+
+
+	for (int i = 0; i < contours_bw_label.size(); i++)
+	{
+		Scalar color = Scalar((i + 1) * 15, (i + 1) * 15, (i + 1) * 15);
+		drawContours(bw_nodes, contours_bw_label, i, color, 2, 8, hierarchy_bw_label, 0, Point());
+	}
+	imshow("Contours on nodes", bw_nodes);
+
+	// Dynamically allocate array
+	//int* node_arr = (int *)malloc(sizeof(int));
+	//imshow("Result window", drawing);
+	cout << "Number of COMPONENTS = " << imageVector.size() << endl;
+
+	int k = 0;
+	int intensity = 0;
+	//int prev_int = 1;
+	int elem_num = 0;
+	for (int i = imageVector.size() - 1; i >= 0; i--) // imageVector.size() is the number of the components
+	{
+		int min_x = imgVectLoc_x0[i] - 2;
+		int min_y = imgVectLoc_y0[i] - 2;
+		int dx = imgVectLoc_dx[i] + 4;
+		int dy = imgVectLoc_dy[i] + 4;
+
+		//		Mat solid_black_copy = black.clone();
+		//imshow("bw_origg", bw_orig);
+
+		Mat bw_orig_copy = bw_orig.clone();
+		Mat small(bw_orig_copy, Rect(min_x, min_y, dx, dy));
+
+		bitwise_not(small, small);
+		threshold(small, small, 120, 1, 0);
+
+		//imshow("SMALLL", small);
+
+		//imshow("bw_origgg", bw_orig);
+
+		Mat black_copy = black.clone();
+		cvtColor(black_copy, black_copy, COLOR_BGR2GRAY);
+		//		bitwise_not(black_copy, black_copy);
+		small.copyTo(black_copy(Rect(min_x, min_y, small.cols, small.rows)));
+
+		cout << endl << endl << "DEGUG TESTING TESTING" << endl << endl;
+
+		Mat current_element_nodes = black_copy + bw_nodes;     //WOW Black to solid blakc
+		//imwrite("C:\\Users\\Kyungho Nam\\Dropbox\\Own\\currentbuild\\current_element_nodes.png", current_element_nodes);
+		/*
+		threshold(black_copy, black_copy, 0.5, 255, 0);
+		threshold(bw_nodes, bw_nodes, 0.5, 255, 0);
+		threshold(current_element_nodes, current_element_nodes, 0.5, 255, 0);
+		*/
+		//imshow("black_copy", black_copy);
+		//imshow("bw_nodes", bw_nodes);
+		//imwrite("C:\\Users\\Kyungho Nam\\Dropbox\\Own\\currentbuild\\bw_nodes.png", bw_nodes);
+		imshow("current_element_nodes", current_element_nodes);
+
+		for (int j = 1; j <= contours_bw_label.size(); j++) // contours_bw_label.size() is the number of real nodes
+		{
+			//cout << "j values = " << j << endl;
+			for (int row = 0; row < current_element_nodes.rows; row++)
+			{
+				// Itterate over all the nodes
+				for (int col = 0; col < current_element_nodes.cols; col++)
+				{
+					intensity = current_element_nodes.at<uchar>(row, col);
+
+					if (intensity == (j * 15 + 1))
+					{
+						elem[elem_num].nodes[k % 2] = j;
+						j = j + 1;
+
+						cout << "elem[" << elem_num << "].nodes[" << k % 2 << "] = " << elem[elem_num].nodes[k % 2] << endl;
+
+						k = k + 1;
+						cout << " The intensity is = " << intensity << endl;
+						//prev_int = intensity;
+					}
+				}
+			}
+		}
+		elem_num++;
+	}
+
+	//	Mat overall_image = black + bw_nodes;
+
+	cout << "::::::::::::::::::::RESULTS::::::::::::::::::::::::::::::::::" << endl;
+	for (int i = 0; i < imageVector.size(); ++i)
+	{
+		//cout << "Element #" << i + 1 << " is an " << elem[i].type << endl;
+		//cout << "Node Connections: " << elem[i].nodes[0] << " and " << elem[i].nodes[1] << endl << endl;
+	}
+
+	waitKey(0);
+	return 0;
+}
+
+
+int analyze_slice(Mat slice, const char* orientation) {
+
+	vector<vector<Point> > contours_slice;
+	vector<Vec4i> hierarchy_slice;
+	RNG rng(12345); // Randomize the colors of bounding boxes
+	Mat gray_slice;
+//	cvtColor(slice, gray_slice, COLOR_BGR2GRAY);
+	
+	//bitwise_not(slice, gray_slice);     << A or
+	gray_slice = slice;				   // << B
+
+	imshow("ROI INSIDE analyze_ROI function", gray_slice);
+
+	Mat thresh_slice;
+	threshold(gray_slice, thresh_slice, 120, 255, 0);
+
+	Mat thresh_slice_padded;
+	int top, bottom, left, right;
+	if (strcmp(orientation, "vert"))
+	{
+		top = bottom = 2;
+		left = right = 0;
+	}
+	else if (strcmp(orientation, "horz"))
+	{
+		top = bottom = 0;
+		left = right = 2;
+	}
+
+	int borderType = BORDER_CONSTANT;
+	Scalar value = Scalar(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+
+	copyMakeBorder(thresh_slice, thresh_slice_padded, top, bottom, left, right, borderType, value);
+	imshow("Threshold", thresh_slice_padded);
+
+/*
+	Mat white_copying = white.clone();
+	Size size(white_copying.cols + 5, white_copying.rows + 5);
+	resize(white_copying, white_copying, size);
+	thresh_slice_padded.copyTo(white_copying(Rect(2, 2, thresh_slice_padded.cols, thresh_slice_padded.rows)));
+	imshow("Show me the money ", white_copying);
+	waitKey(0);
+*/
+
+	//imwrite("C:\\Users\\Kyungho Nam\\Dropbox\\Own\\currentbuild\\thresh_slice_padded.png", thresh_slice_padded);
+	findContours(thresh_slice_padded, contours_slice, hierarchy_slice, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE, Point(0, 0));
+	return contours_slice.size()-1;
+}
